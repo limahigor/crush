@@ -788,11 +788,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	var stepMessages []fantasy.Message
 	var shouldSummarize bool
 	sanitizedToolCalls := make(map[string]bool)
-	// Don't send MaxOutputTokens if 0 — some providers (e.g. LM Studio) reject it
-	var maxOutputTokens *int64
-	if call.MaxOutputTokens > 0 {
-		maxOutputTokens = &call.MaxOutputTokens
-	}
+	maxOutputTokens := maxOutputTokensForProvider(largeModel.ModelCfg.Provider, call.MaxOutputTokens)
 	result, err = agent.Stream(genCtx, fantasy.AgentStreamCall{
 		Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
 		Files:            files,
@@ -1747,13 +1743,15 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 	largeModel := a.largeModel.Get()
 	systemPromptPrefix := a.systemPromptPrefix.Get()
 
-	newAgent := func(m fantasy.LanguageModel, p []byte, tok int64) fantasy.Agent {
-		return fantasy.NewAgent(
-			m,
-			fantasy.WithSystemPrompt(string(p)+"\n /no_think"),
-			fantasy.WithMaxOutputTokens(tok),
+	newAgent := func(model Model, p []byte, tok int64) fantasy.Agent {
+		options := []fantasy.AgentOption{
+			fantasy.WithSystemPrompt(string(p) + "\n /no_think"),
 			fantasy.WithUserAgent(userAgent),
-		)
+		}
+		if maxOutputTokensForProvider(model.ModelCfg.Provider, tok) != nil {
+			options = append(options, fantasy.WithMaxOutputTokens(tok))
+		}
+		return fantasy.NewAgent(model.Model, options...)
 	}
 
 	streamCall := fantasy.AgentStreamCall{
@@ -1788,7 +1786,7 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		if attempt.model.CatwalkCfg.CanReason {
 			tok = attempt.model.CatwalkCfg.DefaultMaxTokens
 		}
-		agent := newAgent(attempt.model.Model, titlePrompt, tok)
+		agent := newAgent(attempt.model, titlePrompt, tok)
 		resp, err = agent.Stream(ctx, streamCall)
 		if err == nil && resp.Response.FinishReason != fantasy.FinishReasonLength {
 			model = attempt.model
@@ -1869,6 +1867,13 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		return
 	}
 	titleSaved = true
+}
+
+func maxOutputTokensForProvider(providerID string, tokens int64) *int64 {
+	if tokens <= 0 || config.IsOpenAICodexProvider(providerID) {
+		return nil
+	}
+	return &tokens
 }
 
 func (a *sessionAgent) openrouterCost(metadata fantasy.ProviderMetadata) *float64 {

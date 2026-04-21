@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/crush/internal/ui/common"
 	"github.com/charmbracelet/crush/internal/ui/util"
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/exp/charmtone"
 )
 
 type openAICodexAuthInitMsg struct {
@@ -117,7 +118,7 @@ func NewOAuthOpenAI(
 
 	m.spinner = spinner.New(
 		spinner.WithSpinner(spinner.Dot),
-		spinner.WithStyle(t.Dialog.SecondaryText),
+		spinner.WithStyle(t.Dialog.PrimaryText.Foreground(charmtone.Julep)),
 	)
 
 	m.input = textinput.New()
@@ -290,7 +291,7 @@ func (m *OAuthOpenAI) headerContent() string {
 	if m.isOnboarding {
 		return textStyle.Render(m.dialogTitle())
 	}
-	return common.DialogTitle(t, titleStyle.Render(m.dialogTitle()), m.width-headerOffset, t.WorkingGradFromColor, t.WorkingGradToColor)
+	return common.DialogTitle(t, titleStyle.Render(m.dialogTitle()), m.width-headerOffset, charmtone.Charple, charmtone.Dolly)
 }
 
 func (m *OAuthOpenAI) innerDialogContent() string {

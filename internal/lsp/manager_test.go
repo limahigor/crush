@@ -2,6 +2,8 @@ package lsp
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -112,4 +114,33 @@ func TestCanAutoStartCachesMissingCommand(t *testing.T) {
 	require.False(t, manager.canAutoStart("gopls", "main.go", t.TempDir(), server))
 	require.False(t, manager.canAutoStart("gopls", "main.go", t.TempDir(), server))
 	require.Equal(t, 1, lookups)
+}
+
+func TestHandlesWorkspaceDirectory(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	goMod := filepath.Join(workDir, "go.mod")
+	require.NoError(t, os.WriteFile(goMod, []byte("module example.com/test\n"), 0o644))
+
+	server := &powernapconfig.ServerConfig{
+		Command:     "gopls",
+		FileTypes:   []string{"go"},
+		RootMarkers: []string{"go.mod"},
+	}
+
+	require.True(t, handles(server, workDir, workDir))
+}
+
+func TestHandlesWorkspaceDirectoryRequiresRootMarkers(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	server := &powernapconfig.ServerConfig{
+		Command:     "gopls",
+		FileTypes:   []string{"go"},
+		RootMarkers: []string{"go.mod"},
+	}
+
+	require.False(t, handles(server, workDir, workDir))
 }
