@@ -24,6 +24,7 @@ import (
 	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/home"
+	openaioauth "github.com/charmbracelet/crush/internal/oauth/openai"
 	powernapConfig "github.com/charmbracelet/x/powernap/pkg/config"
 	"github.com/qjebbs/go-jsons"
 	"github.com/tidwall/gjson"
@@ -275,6 +276,17 @@ func (c *Config) configureProviders(store *ConfigStore, env env.Env, resolver Va
 			continue
 		case p.ID == catwalk.InferenceProviderCopilot && config.OAuthToken != nil:
 			prepared.SetupGitHubCopilot()
+		case string(p.ID) == OpenAICodexProviderID:
+			accountID := ""
+			if config.OAuthToken != nil {
+				parsed, err := openaioauth.ExtractAccountID(config.OAuthToken.AccessToken)
+				if err != nil {
+					slog.Warn("Failed to parse ChatGPT account id", "error", err)
+				} else {
+					accountID = parsed
+				}
+			}
+			prepared.SetupOpenAICodex(accountID)
 		}
 
 		switch p.ID {
