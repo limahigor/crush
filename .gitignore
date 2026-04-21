@@ -37,6 +37,8 @@ Thumbs.db
 # Binary output directory
 /bin/
 /dist/
+/go-build/
+/.tmp-go/
 
 # Local environment variables
 .env
