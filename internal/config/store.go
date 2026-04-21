@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/oauth/hyper"
+	openaioauth "github.com/charmbracelet/crush/internal/oauth/openai"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -256,6 +257,11 @@ func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey a
 	providerConfig, exists = s.config.Providers.Get(providerID)
 	if exists {
 		setKeyOrToken()
+		if IsOpenAICodexProvider(providerID) {
+			if err := s.applyOpenAICodex(scope, providerID, &providerConfig); err != nil {
+				return err
+			}
+		}
 		s.config.Providers.Set(providerID, providerConfig)
 		return nil
 	}
@@ -280,6 +286,11 @@ func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey a
 			Models:       foundProvider.Models,
 		}
 		setKeyOrToken()
+		if IsOpenAICodexProvider(providerID) {
+			if err := s.applyOpenAICodex(scope, providerID, &providerConfig); err != nil {
+				return err
+			}
+		}
 	} else {
 		return fmt.Errorf("provider with ID %s not found in known providers", providerID)
 	}
@@ -305,6 +316,8 @@ func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, provid
 		newToken, refreshErr = copilot.RefreshToken(ctx, providerConfig.OAuthToken.RefreshToken)
 	case hyperp.Name:
 		newToken, refreshErr = hyper.ExchangeToken(ctx, providerConfig.OAuthToken.RefreshToken)
+	case OpenAICodexProviderID:
+		newToken, refreshErr = openaioauth.RefreshToken(ctx, providerConfig.OAuthToken.RefreshToken)
 	default:
 		return fmt.Errorf("OAuth refresh not supported for provider %s", providerID)
 	}
@@ -319,6 +332,12 @@ func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, provid
 	switch providerID {
 	case string(catwalk.InferenceProviderCopilot):
 		providerConfig.SetupGitHubCopilot()
+	case OpenAICodexProviderID:
+		accountID, err := openaioauth.ExtractAccountID(newToken.AccessToken)
+		if err != nil {
+			slog.Warn("Failed to parse ChatGPT account id", "error", err)
+		}
+		providerConfig.SetupOpenAICodex(accountID)
 	}
 
 	s.config.Providers.Set(providerID, providerConfig)
@@ -329,7 +348,45 @@ func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, provid
 	); err != nil {
 		return fmt.Errorf("failed to persist refreshed token: %w", err)
 	}
+	if IsOpenAICodexProvider(providerID) {
+		if err := s.persistOpenAICodexConfig(scope, providerID, providerConfig); err != nil {
+			return err
+		}
+	}
 
+	return nil
+}
+
+func (s *ConfigStore) applyOpenAICodex(scope Scope, providerID string, providerConfig *ProviderConfig) error {
+	accessToken := providerConfig.APIKey
+	if providerConfig.OAuthToken != nil && providerConfig.OAuthToken.AccessToken != "" {
+		accessToken = providerConfig.OAuthToken.AccessToken
+	}
+
+	accountID := ""
+	if accessToken != "" {
+		parsed, err := openaioauth.ExtractAccountID(accessToken)
+		if err != nil {
+			slog.Warn("Failed to parse ChatGPT account id", "error", err)
+		} else {
+			accountID = parsed
+		}
+	}
+
+	providerConfig.SetupOpenAICodex(accountID)
+	return s.persistOpenAICodexConfig(scope, providerID, *providerConfig)
+}
+
+func (s *ConfigStore) persistOpenAICodexConfig(scope Scope, providerID string, providerConfig ProviderConfig) error {
+	if !IsOpenAICodexProvider(providerID) {
+		return nil
+	}
+	if err := cmp.Or(
+		s.SetConfigField(scope, fmt.Sprintf("providers.%s.extra_headers", providerID), providerConfig.ExtraHeaders),
+		s.SetConfigField(scope, fmt.Sprintf("providers.%s.extra_body", providerID), providerConfig.ExtraBody),
+	); err != nil {
+		return fmt.Errorf("failed to persist OpenAI Codex defaults: %w", err)
+	}
 	return nil
 }
 

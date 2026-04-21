@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/env"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
+	openaioauth "github.com/charmbracelet/crush/internal/oauth/openai"
 	"github.com/invopop/jsonschema"
 )
 
@@ -158,6 +159,33 @@ func (c *ProviderConfig) SetupGitHubCopilot() {
 	maps.Copy(c.ExtraHeaders, copilot.Headers())
 }
 
+// SetupOpenAICodex applies the default request shape expected by the ChatGPT
+// Codex backend.
+func (c *ProviderConfig) SetupOpenAICodex(accountID string) {
+	if c.ExtraHeaders == nil {
+		c.ExtraHeaders = make(map[string]string)
+	}
+	if c.ExtraBody == nil {
+		c.ExtraBody = make(map[string]any)
+	}
+	if _, ok := c.ExtraHeaders[openaioauth.HeaderOpenAIBeta]; !ok {
+		c.ExtraHeaders[openaioauth.HeaderOpenAIBeta] = openaioauth.HeaderOpenAIBetaVal
+	}
+	if _, ok := c.ExtraHeaders[openaioauth.HeaderOriginator]; !ok {
+		c.ExtraHeaders[openaioauth.HeaderOriginator] = openaioauth.HeaderOriginatorVal
+	}
+	if accountID != "" {
+		c.ExtraHeaders[openaioauth.HeaderAccountID] = accountID
+	}
+	if _, ok := c.ExtraBody["store"]; !ok {
+		c.ExtraBody["store"] = false
+	}
+	if _, ok := c.ExtraBody["instructions"]; !ok {
+		c.ExtraBody["instructions"] = openAICodexInstructions
+	}
+	c.ExtraBody["include"] = ensureReasoningInclude(c.ExtraBody["include"])
+}
+
 type MCPType string
 
 const (
@@ -237,6 +265,34 @@ func (Attribution) JSONSchemaExtend(schema *jsonschema.Schema) {
 			prop.Deprecated = true
 		}
 	}
+}
+
+func ensureReasoningInclude(value any) []string {
+	items := []string{}
+	switch v := value.(type) {
+	case []string:
+		items = append(items, v...)
+	case []any:
+		for _, entry := range v {
+			if s, ok := entry.(string); ok {
+				items = append(items, s)
+			}
+		}
+	}
+
+	seen := map[string]bool{}
+	result := []string{}
+	for _, item := range items {
+		if item == "" || seen[item] {
+			continue
+		}
+		seen[item] = true
+		result = append(result, item)
+	}
+	if !seen["reasoning.encrypted_content"] {
+		result = append(result, "reasoning.encrypted_content")
+	}
+	return result
 }
 
 type Options struct {

@@ -186,9 +186,23 @@ func Providers(cfg *Config) ([]catwalk.Provider, error) {
 		wg.Wait()
 
 		providerList = slices.Collect(providers.Seq())
+		if !customProvidersOnly {
+			providerList = upsertProvider(providerList, OpenAICodexProvider())
+		}
 		providerErr = errors.Join(errs...)
 	})
 	return providerList, providerErr
+}
+
+func upsertProvider(providers []catwalk.Provider, provider catwalk.Provider) []catwalk.Provider {
+	for i, existing := range providers {
+		if existing.ID != provider.ID {
+			continue
+		}
+		providers[i] = provider
+		return providers
+	}
+	return append(providers, provider)
 }
 
 type cache[T any] struct {
