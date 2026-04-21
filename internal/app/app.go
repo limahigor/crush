@@ -154,7 +154,10 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		client.SetDiagnosticsCallback(updateLSPDiagnostics)
 		updateLSPState(name, client.GetServerState(), nil, client, 0)
 	})
-	go app.LSPManager.TrackConfigured()
+	go func() {
+		app.LSPManager.TrackConfigured()
+		app.LSPManager.StartConfigured(ctx)
+	}()
 
 	return app, nil
 }
