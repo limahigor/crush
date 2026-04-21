@@ -253,11 +253,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*fantasy
 
 	var currentAssistant *message.Message
 	var shouldSummarize bool
-	// Don't send MaxOutputTokens if 0 — some providers (e.g. LM Studio) reject it
-	var maxOutputTokens *int64
-	if call.MaxOutputTokens > 0 {
-		maxOutputTokens = &call.MaxOutputTokens
-	}
+	maxOutputTokens := maxOutputTokensForProvider(largeModel.ModelCfg.Provider, call.MaxOutputTokens)
 	result, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
 		Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
 		Files:            files,
@@ -934,12 +930,15 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		maxOutputTokens = smallModel.CatwalkCfg.DefaultMaxTokens
 	}
 
-	newAgent := func(m fantasy.LanguageModel, p []byte, tok int64) fantasy.Agent {
-		return fantasy.NewAgent(m,
-			fantasy.WithSystemPrompt(string(p)+"\n /no_think"),
-			fantasy.WithMaxOutputTokens(tok),
+	newAgent := func(model Model, p []byte, tok int64) fantasy.Agent {
+		options := []fantasy.AgentOption{
+			fantasy.WithSystemPrompt(string(p) + "\n /no_think"),
 			fantasy.WithUserAgent(userAgent),
-		)
+		}
+		if maxOutputTokensForProvider(model.ModelCfg.Provider, tok) != nil {
+			options = append(options, fantasy.WithMaxOutputTokens(tok))
+		}
+		return fantasy.NewAgent(model.Model, options...)
 	}
 
 	streamCall := fantasy.AgentStreamCall{
@@ -957,7 +956,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 
 	// Use the small model to generate the title.
 	model := smallModel
-	agent := newAgent(model.Model, titlePrompt, maxOutputTokens)
+	agent := newAgent(model, titlePrompt, maxOutputTokens)
 	resp, err := agent.Stream(ctx, streamCall)
 	if err == nil {
 		// We successfully generated a title with the small model.
@@ -966,7 +965,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		// It didn't work. Let's try with the big model.
 		slog.Error("Error generating title with small model; trying big model", "err", err)
 		model = largeModel
-		agent = newAgent(model.Model, titlePrompt, maxOutputTokens)
+		agent = newAgent(model, titlePrompt, maxOutputTokens)
 		resp, err = agent.Stream(ctx, streamCall)
 		if err == nil {
 			slog.Debug("Generated title with large model")
@@ -1038,6 +1037,13 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		slog.Error("Failed to save session title and usage", "error", saveErr)
 		return
 	}
+}
+
+func maxOutputTokensForProvider(providerID string, tokens int64) *int64 {
+	if tokens <= 0 || config.IsOpenAICodexProvider(providerID) {
+		return nil
+	}
+	return &tokens
 }
 
 func (a *sessionAgent) openrouterCost(metadata fantasy.ProviderMetadata) *float64 {

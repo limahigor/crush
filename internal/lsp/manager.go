@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -87,6 +88,21 @@ func (s *Manager) TrackConfigured() {
 		}
 		wg.Go(func() {
 			s.callback(name, nil)
+		})
+	}
+	wg.Wait()
+}
+
+// StartConfigured starts only user-configured LSP servers for the current
+// workspace root.
+func (s *Manager) StartConfigured(ctx context.Context) {
+	var wg sync.WaitGroup
+	for name, server := range s.manager.GetServers() {
+		if !s.isUserConfigured(name) {
+			continue
+		}
+		wg.Go(func() {
+			s.startServer(ctx, name, s.cfg.WorkingDir(), server)
 		})
 	}
 	wg.Wait()
@@ -322,6 +338,12 @@ func hasRootMarkers(dir string, markers []string) bool {
 }
 
 func handles(server *powernapconfig.ServerConfig, filePath, workDir string) bool {
+	if filePath == "" {
+		return hasRootMarkers(workDir, server.RootMarkers)
+	}
+	if info, err := os.Stat(filePath); err == nil && info.IsDir() {
+		return hasRootMarkers(workDir, server.RootMarkers)
+	}
 	return handlesFiletype(server.Command, server.FileTypes, filePath) &&
 		hasRootMarkers(workDir, server.RootMarkers)
 }
