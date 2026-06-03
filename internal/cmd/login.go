@@ -1,19 +1,26 @@
 package cmd
 
 import (
+	"bufio"
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/crush/internal/browserutil"
 	"github.com/charmbracelet/crush/internal/client"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/oauth/hyper"
+	openaioauth "github.com/charmbracelet/crush/internal/oauth/openai"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
@@ -35,10 +42,17 @@ crush login copilot
 
 # Force re-authentication even if already logged in
 crush login -f copilot
+
+# Authenticate with OpenAI Codex (ChatGPT OAuth)
+crush login openai-codex
   `,
 	ValidArgs: []cobra.Completion{
 		"hyper",
 		"copilot",
+		"openai",
+		"openai-codex",
+		"codex",
+		"chatgpt",
 		"github",
 		"github-copilot",
 	},
@@ -66,6 +80,8 @@ crush login -f copilot
 			return loginHyper(c, ws.ID, force)
 		case "copilot", "github", "github-copilot":
 			return loginCopilot(c, ws.ID, force)
+		case "openai", "openai-codex", "codex", "chatgpt":
+			return loginOpenAICodex(cmd.Context(), c, ws.ID)
 		default:
 			return fmt.Errorf("unknown platform: %s", args[0])
 		}
@@ -215,6 +231,105 @@ func loginCopilot(c *client.Client, wsID string, force bool) error {
 	fmt.Println()
 	fmt.Println("You're now authenticated with GitHub Copilot!")
 	return nil
+}
+
+func loginOpenAICodex(ctx context.Context, c *client.Client, wsID string) error {
+	loginCtx := getLoginContext()
+
+	cfg, err := c.GetConfig(ctx, wsID)
+	if err == nil && cfg != nil {
+		if pc, ok := cfg.Providers.Get(config.OpenAICodexProviderID); ok && pc.OAuthToken != nil {
+			fmt.Println("You are already logged in to OpenAI Codex.")
+			return nil
+		}
+	}
+
+	flow, err := openaioauth.CreateAuthorizationFlow()
+	if err != nil {
+		return err
+	}
+
+	server, err := openaioauth.StartLocalServer(flow.State)
+	if err != nil {
+		fmt.Println("Could not start local callback server; falling back to manual login.")
+		return completeOpenAICodexLogin(loginCtx, c, wsID, flow, true)
+	}
+	defer server.Close()
+
+	fmt.Println("Opening browser for OpenAI Codex authentication...")
+	if err := browserutil.OpenURL(flow.URL); err != nil {
+		fmt.Println("Could not open the browser. Use this URL to continue:")
+		fmt.Println(flow.URL)
+	}
+
+	code, err := waitForOpenAICodexCode(loginCtx, server)
+	if err != nil {
+		fmt.Println("Timed out waiting for the OAuth callback; falling back to manual login.")
+		return completeOpenAICodexLogin(loginCtx, c, wsID, flow, true)
+	}
+
+	token, err := openaioauth.ExchangeAuthorizationCode(loginCtx, code, flow.Verifier)
+	if err != nil {
+		return err
+	}
+	if err := c.SetProviderAPIKey(loginCtx, wsID, config.ScopeGlobal, config.OpenAICodexProviderID, token); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Println("You're now authenticated with OpenAI Codex!")
+	return nil
+}
+
+func waitForOpenAICodexCode(ctx context.Context, server *openaioauth.LocalServer) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	return server.WaitForCode(ctx)
+}
+
+func completeOpenAICodexLogin(ctx context.Context, c *client.Client, wsID string, flow openaioauth.AuthFlow, printURL bool) error {
+	token, err := loginOpenAICodexManual(ctx, flow, printURL)
+	if err != nil {
+		return err
+	}
+	if err := c.SetProviderAPIKey(ctx, wsID, config.ScopeGlobal, config.OpenAICodexProviderID, token); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Println("You're now authenticated with OpenAI Codex!")
+	return nil
+}
+
+func loginOpenAICodexManual(ctx context.Context, flow openaioauth.AuthFlow, printURL bool) (*oauth.Token, error) {
+	if printURL {
+		fmt.Println("Open the following URL in your browser and complete the login:")
+		fmt.Println()
+		fmt.Println(flow.URL)
+		fmt.Println()
+	}
+	fmt.Println("Paste the full redirect URL (or just the code) and press enter:")
+	codeInput, err := readLine()
+	if err != nil {
+		return nil, err
+	}
+	code, state := openaioauth.ParseAuthorizationInput(codeInput)
+	if code == "" {
+		return nil, fmt.Errorf("authorization code not provided")
+	}
+	if state != "" && state != flow.State {
+		return nil, fmt.Errorf("authorization state does not match, please retry")
+	}
+	return openaioauth.ExchangeAuthorizationCode(ctx, code, flow.Verifier)
+}
+
+func readLine() (string, error) {
+	reader := bufio.NewReader(os.Stdin)
+	value, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("failed to read input: %w", err)
+	}
+	return strings.TrimSpace(value), nil
 }
 
 func getLoginContext() context.Context {
