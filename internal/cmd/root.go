@@ -416,12 +416,42 @@ func connectToServer(cmd *cobra.Command) (*client.Client, *proto.Workspace, func
 // version matches the client; on mismatch it shuts down the old server
 // and starts a fresh one.
 func ensureServer(cmd *cobra.Command, hostURL *url.URL) error {
+	// Initialize the persistent log here so stale-socket diagnostics
+	// emitted before connectToServer runs are captured in the per-host
+	// server log file. crushlog.Setup uses sync.Once internally, so the
+	// later call from connectToServer becomes a no-op.
+	debug, _ := cmd.Flags().GetBool("debug")
+	logFile := filepath.Join(config.GlobalCacheDir(), "server-"+safeHostName(hostURL), "crush.log")
+	crushlog.Setup(logFile, debug)
+
 	switch hostURL.Scheme {
 	case "unix", "npipe":
 		needsStart := false
 		_, statErr := os.Stat(hostURL.Host)
 		switch {
 		case statErr == nil:
+			// Probe the socket explicitly before the version-check
+			// path. A stale unix socket file (the previous server
+			// exited without cleaning up) would otherwise make
+			// restartIfStale spin on a non-responsive endpoint; here
+			// we detect it with a short DialTimeout and remove the
+			// orphaned file so the normal spawn path can run.
+			if hostURL.Scheme == "unix" {
+				conn, dialErr := net.DialTimeout( //nolint:noctx
+					hostURL.Scheme, hostURL.Host, 200*time.Millisecond,
+				)
+				if dialErr == nil {
+					conn.Close()
+				} else if server.IsStaleSocketErr(dialErr) {
+					slog.Warn("Stale socket detected, removing",
+						"path", hostURL.Host, "error", dialErr)
+					if err := os.Remove(hostURL.Host); err != nil && !errors.Is(err, fs.ErrNotExist) {
+						return fmt.Errorf("failed to remove stale server socket %q: %v", hostURL.Host, err)
+					}
+					needsStart = true
+					break
+				}
+			}
 			restarted, err := restartIfStale(cmd, hostURL)
 			if err != nil {
 				slog.Warn("Failed to check server version", "error", err)

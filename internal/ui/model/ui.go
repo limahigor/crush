@@ -1810,7 +1810,7 @@ func (m *UI) openAuthenticationDialog(provider catwalk.Provider, model config.Se
 		return nil
 	}
 
-	m.dialog.OpenDialog(dlg)
+	m.dialog.OpenDialogWithGrace(dlg)
 	return cmd
 }
 
@@ -3287,12 +3287,12 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 	// Capture session ID to avoid race with main goroutine updating m.session.
 	sessionID := m.session.ID
 	cmds = append(cmds, func() tea.Msg {
+		// AgentRun is fire-and-forget: it returns once the prompt has
+		// been accepted (HTTP 202) or synchronously with a validation
+		// or transport error. Run failures and cancellation surface
+		// through SSE-derived events, not this return value.
 		err := m.com.Workspace.AgentRun(context.Background(), sessionID, content, attachments...)
 		if err != nil {
-			isCancelErr := errors.Is(err, context.Canceled)
-			if isCancelErr {
-				return nil
-			}
 			return util.InfoMsg{
 				Type: util.InfoTypeError,
 				Msg:  fmt.Sprintf("%v", err),
@@ -3521,7 +3521,7 @@ func (m *UI) openPermissionsDialog(perm permission.PermissionRequest) tea.Cmd {
 	}
 
 	permDialog := dialog.NewPermissions(m.com, perm, opts...)
-	m.dialog.OpenDialog(permDialog)
+	m.dialog.OpenDialogWithGrace(permDialog)
 	return nil
 }
 

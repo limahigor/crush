@@ -704,13 +704,18 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 			Payload: protoToFile(e.Payload),
 		}
 	case pubsub.Event[proto.AgentEvent]:
+		n := notify.Notification{
+			SessionID:    e.Payload.SessionID,
+			SessionTitle: e.Payload.SessionTitle,
+			RunID:        e.Payload.RunID,
+			Type:         notify.Type(e.Payload.Type),
+		}
+		if e.Payload.Error != nil {
+			n.Message = e.Payload.Error.Error()
+		}
 		return pubsub.Event[notify.Notification]{
-			Type: e.Type,
-			Payload: notify.Notification{
-				SessionID:    e.Payload.SessionID,
-				SessionTitle: e.Payload.SessionTitle,
-				Type:         notify.Type(e.Payload.Type),
-			},
+			Type:    e.Type,
+			Payload: n,
 		}
 	case pubsub.Event[proto.RunComplete]:
 		// Translate the wire-level proto.RunComplete back into the
