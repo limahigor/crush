@@ -31,6 +31,7 @@ import (
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
+	anthropicoauth "github.com/charmbracelet/crush/internal/oauth/anthropic"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	openaioauth "github.com/charmbracelet/crush/internal/oauth/openai"
 	"github.com/charmbracelet/crush/internal/permission"
@@ -1036,11 +1037,20 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 	}
 
 	// handle special headers for anthropic
-	if providerCfg.Type == anthropic.Name && c.isAnthropicThinking(model) {
-		if v, ok := headers["anthropic-beta"]; ok {
-			headers["anthropic-beta"] = v + ",interleaved-thinking-2025-05-14"
-		} else {
-			headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
+	if providerCfg.Type == anthropic.Name {
+		if providerCfg.OAuthToken != nil {
+			providerCfg.SetupAnthropicOAuth()
+			headers = maps.Clone(providerCfg.ExtraHeaders)
+			if headers == nil {
+				headers = make(map[string]string)
+			}
+		}
+		if c.isAnthropicThinking(model) {
+			if v, ok := headers[anthropicoauth.HeaderBeta]; ok {
+				headers[anthropicoauth.HeaderBeta] = v + ",interleaved-thinking-2025-05-14"
+			} else {
+				headers[anthropicoauth.HeaderBeta] = "interleaved-thinking-2025-05-14"
+			}
 		}
 	}
 
