@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
-	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/crush/internal/browserutil"
 	"github.com/charmbracelet/crush/internal/client"
+	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
@@ -111,11 +111,8 @@ func loginHyper(c *client.Client, wsID string, force bool) error {
 		return err
 	}
 
-	if clipboard.WriteAll(resp.UserCode) == nil {
-		fmt.Println("The following code should be on clipboard already:")
-	} else {
-		fmt.Println("Copy the following code:")
-	}
+	clipboard.WriteText(resp.UserCode)
+	fmt.Println("The following code should be on clipboard already:")
 
 	fmt.Println()
 	fmt.Println(lipgloss.NewStyle().Bold(true).Render(resp.UserCode))

@@ -178,7 +178,7 @@ func TestConfigConfigureProvidersOpenAICodexAddsDefaults(t *testing.T) {
 
 	envv := env.NewFromMap(map[string]string{})
 	resolver := NewShellVariableResolver(envv)
-	err := cfg.configureProviders(testStore(cfg), envv, resolver, knownProviders)
+	err := cfg.configureProviders(t.Context(), testStore(cfg), envv, resolver, knownProviders)
 	require.NoError(t, err)
 
 	provider, ok := cfg.Providers.Get(OpenAICodexProviderID)

@@ -12,9 +12,11 @@ import (
 	"context"
 	_ "embed"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"regexp"
@@ -44,6 +46,7 @@ import (
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/stringext"
 	"github.com/charmbracelet/crush/internal/version"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/charmtone"
 )
 
@@ -138,6 +141,7 @@ type SessionAgent interface {
 	ClearQueue(sessionID string)
 	Summarize(context.Context, string, fantasy.ProviderOptions) error
 	Model() Model
+	GenerateTitle(ctx context.Context, sessionID, userPrompt string)
 }
 
 type Model struct {
@@ -681,11 +685,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	}
 
 	var wg sync.WaitGroup
-	// Generate title if first message.
-	if len(msgs) == 0 {
+	// Generate title from the first real (non-shell) user prompt.
+	if !hasUserTextMessage(msgs) {
 		titleCtx := ctx // Copy to avoid race with ctx reassignment below.
 		wg.Go(func() {
-			a.generateTitle(titleCtx, call.SessionID, call.Prompt)
+			a.GenerateTitle(titleCtx, call.SessionID, call.Prompt)
 		})
 	}
 	defer wg.Wait()
@@ -778,6 +782,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 
 	var stepMessages []fantasy.Message
 	var shouldSummarize bool
+	sanitizedToolCalls := make(map[string]bool)
 	maxOutputTokens := maxOutputTokensForProvider(largeModel.ModelCfg.Provider, call.MaxOutputTokens)
 	result, err = agent.Stream(genCtx, fantasy.AgentStreamCall{
 		Prompt:           message.PromptWithTextAttachments(call.Prompt, call.Attachments),
@@ -917,10 +922,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			slog.Warn("Provider request failed, retrying", providerRetryLogFields(err, delay)...)
 		},
 		OnToolCall: func(tc fantasy.ToolCallContent) error {
+			input, wasSanitized := sanitizeToolInput(tc.ToolName, tc.ToolCallID, tc.Input)
+			if wasSanitized {
+				sanitizedToolCalls[tc.ToolCallID] = true
+			}
 			toolCall := message.ToolCall{
 				ID:               tc.ToolCallID,
 				Name:             tc.ToolName,
-				Input:            tc.Input,
+				Input:            input,
 				ProviderExecuted: false,
 				Finished:         true,
 			}
@@ -931,6 +940,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		},
 		OnToolResult: func(result fantasy.ToolResultContent) error {
 			toolResult := a.convertToToolResult(result)
+			if sanitizedToolCalls[result.ToolCallID] {
+				toolResult.Content = "Tool call failed: arguments were not valid JSON. Please check your tool call format and try again."
+				toolResult.IsError = true
+			}
 			// Use parent ctx instead of genCtx to ensure the message is created
 			// even if the request is canceled mid-stream
 			_, createMsgErr := a.messages.Create(ctx, currentAssistant.SessionID, message.CreateMessageParams{
@@ -942,6 +955,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			return createMsgErr
 		},
 		OnStepFinish: func(stepResult fantasy.StepResult) error {
+			for _, w := range stepResult.Warnings {
+				slog.Warn("Provider warning", "type", w.Type, "message", w.Message)
+			}
 			finishReason := message.FinishReasonUnknown
 			switch stepResult.FinishReason {
 			case fantasy.FinishReasonLength:
@@ -973,6 +989,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			}
 			usage, estimated := fallbackStepUsage(stepMessages, stepResult)
 			a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimated)
+			extractHyperCredits(stepResult.ProviderMetadata)
 			_, sessionErr := a.sessions.Save(ctx, updatedSession)
 			if sessionErr != nil {
 				return sessionErr
@@ -1381,6 +1398,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			}
 			openrouterCost = &newCost
 		}
+		extractHyperCredits(step.ProviderMetadata)
 	}
 
 	a.updateSessionUsage(largeModel, &currentSession, resp.TotalUsage, openrouterCost, false)
@@ -1627,20 +1645,44 @@ func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.S
 	return msgs, nil
 }
 
-// generateTitle generates a session titled based on the initial prompt.
-func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, userPrompt string) {
+// hasUserTextMessage reports whether any user message in msgs contains
+// text content (as opposed to only shell commands or other non-text parts).
+func hasUserTextMessage(msgs []message.Message) bool {
+	for _, msg := range msgs {
+		if msg.Role != message.User {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if tc, ok := part.(message.TextContent); ok && tc.Text != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// GenerateTitle generates a session title based on the initial prompt.
+func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, userPrompt string) {
 	if userPrompt == "" {
 		return
 	}
 
+	// Ensure the session always gets a title even if every path below
+	// fails or the context is cancelled before we finish.
+	var titleSaved bool
+	defer func() {
+		if !titleSaved {
+			fallbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if err := a.sessions.Rename(fallbackCtx, sessionID, DefaultSessionName); err != nil {
+				slog.Error("Failed to save fallback session title", "error", err)
+			}
+		}
+	}()
+
 	smallModel := a.smallModel.Get()
 	largeModel := a.largeModel.Get()
 	systemPromptPrefix := a.systemPromptPrefix.Get()
-
-	var maxOutputTokens int64 = 40
-	if smallModel.CatwalkCfg.CanReason {
-		maxOutputTokens = smallModel.CatwalkCfg.DefaultMaxTokens
-	}
 
 	newAgent := func(model Model, p []byte, tok int64) fantasy.Agent {
 		options := []fantasy.AgentOption{
@@ -1666,41 +1708,40 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		},
 	}
 
-	// Use the small model to generate the title.
-	model := smallModel
-	agent := newAgent(model, titlePrompt, maxOutputTokens)
-	resp, err := agent.Stream(ctx, streamCall)
-	if err == nil {
-		// We successfully generated a title with the small model.
-		slog.Debug("Generated title with small model")
-	} else {
-		// It didn't work. Let's try with the big model.
-		slog.Error("Error generating title with small model; trying big model", "err", err)
-		model = largeModel
-		agent = newAgent(model, titlePrompt, maxOutputTokens)
-		resp, err = agent.Stream(ctx, streamCall)
-		if err == nil {
-			slog.Debug("Generated title with large model")
-		} else {
-			// Welp, the large model didn't work either. Use the default
-			// session name and return.
-			slog.Error("Error generating title with large model", "err", err)
-			saveErr := a.sessions.Rename(ctx, sessionID, DefaultSessionName)
-			if saveErr != nil {
-				slog.Error("Failed to save session title", "error", saveErr)
-			}
-			return
-		}
+	type modelAttempt struct {
+		name  string
+		model Model
+	}
+	attempts := []modelAttempt{
+		{"small", smallModel},
+		{"large", largeModel},
 	}
 
-	if resp == nil {
-		// Actually, we didn't get a response so we can't. Use the default
-		// session name and return.
-		slog.Error("Response is nil; can't generate title")
-		saveErr := a.sessions.Rename(ctx, sessionID, DefaultSessionName)
-		if saveErr != nil {
-			slog.Error("Failed to save session title", "error", saveErr)
+	var resp *fantasy.AgentResult
+	var err error
+	var model Model
+	var success bool
+	for _, attempt := range attempts {
+		tok := int64(40)
+		if attempt.model.CatwalkCfg.CanReason {
+			tok = attempt.model.CatwalkCfg.DefaultMaxTokens
 		}
+		agent := newAgent(attempt.model, titlePrompt, tok)
+		resp, err = agent.Stream(ctx, streamCall)
+		if err == nil && resp.Response.FinishReason != fantasy.FinishReasonLength {
+			model = attempt.model
+			slog.Debug("Generated title with " + attempt.name + " model")
+			success = true
+			break
+		}
+		if err != nil {
+			slog.Error("Error generating title with "+attempt.name+" model; trying next", "err", err)
+		} else {
+			slog.Error("Title generation hit token limit with " + attempt.name + " model; trying next")
+		}
+	}
+	if !success {
+		// The deferred fallback will save the default session name.
 		return
 	}
 
@@ -1713,7 +1754,17 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 	title = orphanThinkTagRegex.ReplaceAllString(title, "")
 
 	title = strings.TrimSpace(title)
-	title = cmp.Or(title, DefaultSessionName)
+	if title == "" {
+		// LLM returned empty content. Use the prompt itself as a
+		// fallback title, truncated to 50 chars, before resorting to
+		// the generic default.
+		fallback := strings.ReplaceAll(userPrompt, "\n", " ")
+		fallback = strings.TrimSpace(fallback)
+		if len(fallback) > 50 {
+			fallback = ansi.Truncate(fallback, 50, "…")
+		}
+		title = cmp.Or(fallback, DefaultSessionName)
+	}
 
 	// Calculate usage and cost.
 	var openrouterCost *float64
@@ -1726,6 +1777,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 			}
 			openrouterCost = &newCost
 		}
+		extractHyperCredits(step.ProviderMetadata)
 	}
 
 	modelConfig := model.CatwalkCfg
@@ -1754,6 +1806,7 @@ func (a *sessionAgent) generateTitle(ctx context.Context, sessionID string, user
 		slog.Error("Failed to save session title and usage", "error", saveErr)
 		return
 	}
+	titleSaved = true
 }
 
 func maxOutputTokensForProvider(providerID string, tokens int64) *int64 {
@@ -1774,6 +1827,25 @@ func (a *sessionAgent) openrouterCost(metadata fantasy.ProviderMetadata) *float6
 		return nil
 	}
 	return &opts.Usage.Cost
+}
+
+// extractHyperCredits reads usage.remaining.hypercredits from OpenAI
+// provider metadata and stores it for the next FetchCredits call.
+func extractHyperCredits(metadata fantasy.ProviderMetadata) {
+	openaiMeta, ok := metadata[openai.Name]
+	if !ok {
+		return
+	}
+	pm, ok := openaiMeta.(*openai.ProviderMetadata)
+	if !ok {
+		return
+	}
+	var remaining struct {
+		Hypercredits float64 `json:"hypercredits"`
+	}
+	if pm.ExtraField("remaining", &remaining) && remaining.Hypercredits > 0 {
+		hyper.SetBalance(int(math.Round(remaining.Hypercredits)))
+	}
 }
 
 func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session, usage fantasy.Usage, overrideCost *float64, estimated bool) {
@@ -2033,6 +2105,8 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 		return messages
 	}
 
+	supportsImages := largeModel.CatwalkCfg.SupportsImages
+
 	convertedMessages := make([]fantasy.Message, 0, len(messages))
 
 	for _, msg := range messages {
@@ -2052,6 +2126,21 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 			}
 
 			if media, ok := fantasy.AsToolResultOutputType[fantasy.ToolResultOutputContentMedia](toolResult.Output); ok {
+				if !supportsImages {
+					// Model cannot process images. Replace with a text
+					// placeholder and skip creating a synthetic user
+					// message with FilePart, which would brick the
+					// session on text-only models.
+					textParts = append(textParts, fantasy.ToolResultPart{
+						ToolCallID: toolResult.ToolCallID,
+						Output: fantasy.ToolResultOutputContentText{
+							Text: "[Image/media content not supported by this model]",
+						},
+						ProviderOptions: toolResult.ProviderOptions,
+					})
+					continue
+				}
+
 				decoded, err := base64.StdEncoding.DecodeString(media.Data)
 				if err != nil {
 					slog.Warn("Failed to decode media data", "error", err)
@@ -2123,4 +2212,21 @@ func providerRetryLogFields(err *fantasy.ProviderError, delay time.Duration) []a
 		fields = append(fields, "message", err.Message)
 	}
 	return fields
+}
+
+// sanitizeToolInput validates tool call JSON from the provider.
+// Malformed input is replaced with an empty object to prevent
+// stuck conversations from truncated or malformed model output.
+// The second return value indicates whether sanitization occurred.
+func sanitizeToolInput(toolName, toolCallID, input string) (string, bool) {
+	if !json.Valid([]byte(input)) {
+		slog.Warn(
+			"Malformed tool call JSON from provider, replacing with empty object",
+			"tool", toolName,
+			"id", toolCallID,
+			"input_len", len(input),
+		)
+		return "{}", true
+	}
+	return input, false
 }
