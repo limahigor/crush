@@ -61,6 +61,13 @@ const (
 
 var userAgent = fmt.Sprintf("Charm-Crush/%s (https://charm.land/crush)", version.Version)
 
+func modelUserAgent(m Model) string {
+	if m.UserAgent != "" {
+		return m.UserAgent
+	}
+	return userAgent
+}
+
 //go:embed templates/title.md
 var titlePrompt []byte
 
@@ -149,6 +156,9 @@ type Model struct {
 	CatwalkCfg catwalk.Model
 	ModelCfg   config.SelectedModel
 	FlatRate   bool
+	// UserAgent overrides the default Crush User-Agent when the provider
+	// requires a specific one (e.g. Anthropic Claude Code OAuth).
+	UserAgent string
 }
 
 type sessionAgent struct {
@@ -670,7 +680,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		largeModel.Model,
 		fantasy.WithSystemPrompt(systemPrompt),
 		fantasy.WithTools(agentTools...),
-		fantasy.WithUserAgent(userAgent),
+		fantasy.WithUserAgent(modelUserAgent(largeModel)),
 	)
 
 	sessionLock := sync.Mutex{}
@@ -1322,7 +1332,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	agent := fantasy.NewAgent(
 		largeModel.Model,
 		fantasy.WithSystemPrompt(string(summaryPrompt)),
-		fantasy.WithUserAgent(userAgent),
+		fantasy.WithUserAgent(modelUserAgent(largeModel)),
 	)
 	summaryMessage, err := a.messages.Create(ctx, sessionID, message.CreateMessageParams{
 		Role:             message.Assistant,
@@ -1687,7 +1697,7 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 	newAgent := func(model Model, p []byte, tok int64) fantasy.Agent {
 		options := []fantasy.AgentOption{
 			fantasy.WithSystemPrompt(string(p) + "\n /no_think"),
-			fantasy.WithUserAgent(userAgent),
+			fantasy.WithUserAgent(modelUserAgent(model)),
 		}
 		if maxOutputTokensForProvider(model.ModelCfg.Provider, tok) != nil {
 			options = append(options, fantasy.WithMaxOutputTokens(tok))

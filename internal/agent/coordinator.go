@@ -586,10 +586,18 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	}
 
 	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
+	systemPromptPrefix := largeProviderCfg.SystemPromptPrefix
+	if largeProviderCfg.Type == anthropic.Name && largeProviderCfg.OAuthToken != nil {
+		if systemPromptPrefix == "" {
+			systemPromptPrefix = anthropicoauth.ClaudeCodeSystemPrompt
+		} else if !strings.HasPrefix(systemPromptPrefix, anthropicoauth.ClaudeCodeSystemPrompt) {
+			systemPromptPrefix = anthropicoauth.ClaudeCodeSystemPrompt + "\n\n" + systemPromptPrefix
+		}
+	}
 	result := NewSessionAgent(SessionAgentOptions{
 		LargeModel:           large,
 		SmallModel:           small,
-		SystemPromptPrefix:   largeProviderCfg.SystemPromptPrefix,
+		SystemPromptPrefix:   systemPromptPrefix,
 		SystemPrompt:         "",
 		IsSubAgent:           isSubAgent,
 		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
@@ -806,17 +814,32 @@ func (c *coordinator) buildAgentModels(ctx context.Context, isSubAgent bool) (Mo
 		return Model{}, Model{}, err
 	}
 
+	largeUserAgent := anthropicOAuthUserAgent(largeProviderCfg)
+	smallUserAgent := anthropicOAuthUserAgent(smallProviderCfg)
+
 	return Model{
 			Model:      largeModel,
 			CatwalkCfg: *largeCatwalkModel,
 			ModelCfg:   largeModelCfg,
 			FlatRate:   largeProviderCfg.FlatRate,
+			UserAgent:  largeUserAgent,
 		}, Model{
 			Model:      smallModel,
 			CatwalkCfg: *smallCatwalkModel,
 			ModelCfg:   smallModelCfg,
 			FlatRate:   smallProviderCfg.FlatRate,
+			UserAgent:  smallUserAgent,
 		}, nil
+}
+
+// anthropicOAuthUserAgent returns the Claude Code CLI User-Agent when a
+// provider is configured with an Anthropic subscriber OAuth token, or an
+// empty string otherwise.
+func anthropicOAuthUserAgent(providerCfg config.ProviderConfig) string {
+	if providerCfg.Type == anthropic.Name && providerCfg.OAuthToken != nil {
+		return anthropicoauth.UserAgent
+	}
+	return ""
 }
 
 func (c *coordinator) buildAnthropicProvider(baseURL, apiKey string, headers map[string]string, providerID string) (fantasy.Provider, error) {
@@ -1056,6 +1079,11 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 
 	apiKey, _ := c.cfg.Resolve(providerCfg.APIKey)
 	baseURL, _ := c.cfg.Resolve(providerCfg.BaseURL)
+
+	// Anthropic OAuth tokens must be sent via Authorization: Bearer, not x-api-key.
+	if providerCfg.Type == anthropic.Name && providerCfg.OAuthToken != nil && !strings.HasPrefix(apiKey, "Bearer ") {
+		apiKey = "Bearer " + apiKey
+	}
 
 	switch providerCfg.ID {
 	case string(catwalk.InferenceProviderOpenCodeGo), string(catwalk.InferenceProviderOpenCodeZen):
