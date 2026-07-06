@@ -14,6 +14,14 @@ const (
 func OpenAICodexProvider() catwalk.Provider {
 	models := []catwalk.Model{
 		openAICodexModel(openAICodexModelSpec{
+			ID:               "gpt-5.5",
+			Name:             "GPT-5.5",
+			ContextWindow:    1050000,
+			DefaultMaxTokens: 128000,
+			ReasoningLevels:  []string{"none", "low", "medium", "high", "xhigh"},
+			DefaultEffort:    "medium",
+		}),
+		openAICodexModel(openAICodexModelSpec{
 			ID:               "gpt-5.4",
 			Name:             "GPT-5.4",
 			ContextWindow:    1050000,
