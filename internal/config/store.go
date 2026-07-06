@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/crush/internal/env"
 	"github.com/charmbracelet/crush/internal/lock"
 	"github.com/charmbracelet/crush/internal/oauth"
+	anthropicoauth "github.com/charmbracelet/crush/internal/oauth/anthropic"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/oauth/hyper"
 	openaioauth "github.com/charmbracelet/crush/internal/oauth/openai"
@@ -472,6 +473,8 @@ func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey a
 			providerConfig.APIKey = v.AccessToken
 			providerConfig.OAuthToken = v
 			switch providerID {
+			case string(catwalk.InferenceProviderAnthropic):
+				providerConfig.SetupAnthropicOAuth()
 			case string(catwalk.InferenceProviderCopilot):
 				providerConfig.SetupGitHubCopilot()
 			}
@@ -609,6 +612,8 @@ func (s *ConfigStore) refreshOAuthTokenLocked(ctx context.Context, scope Scope, 
 	providerConfig.OAuthToken = refreshedToken
 	providerConfig.APIKey = refreshedToken.AccessToken
 	switch providerID {
+	case string(catwalk.InferenceProviderAnthropic):
+		providerConfig.SetupAnthropicOAuth()
 	case string(catwalk.InferenceProviderCopilot):
 		providerConfig.SetupGitHubCopilot()
 	case OpenAICodexProviderID:
@@ -665,6 +670,8 @@ func (s *ConfigStore) exchange(ctx context.Context, providerID, refreshToken str
 	switch providerID {
 	case string(catwalk.InferenceProviderCopilot):
 		return copilot.RefreshToken(ctx, refreshToken)
+	case string(catwalk.InferenceProviderAnthropic):
+		return anthropicoauth.RefreshToken(ctx, refreshToken)
 	case hyperp.Name:
 		return hyper.ExchangeToken(ctx, refreshToken)
 	case OpenAICodexProviderID:
@@ -689,7 +696,10 @@ func (s *ConfigStore) refreshLockPath(providerID string) string {
 func (s *ConfigStore) applyToken(providerConfig ProviderConfig, token *oauth.Token, providerID string) error {
 	providerConfig.OAuthToken = token
 	providerConfig.APIKey = token.AccessToken
-	if providerID == string(catwalk.InferenceProviderCopilot) {
+	switch providerID {
+	case string(catwalk.InferenceProviderAnthropic):
+		providerConfig.SetupAnthropicOAuth()
+	case string(catwalk.InferenceProviderCopilot):
 		providerConfig.SetupGitHubCopilot()
 	}
 	s.Config().Providers.Set(providerID, providerConfig)

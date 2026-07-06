@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/env"
 	"github.com/charmbracelet/crush/internal/oauth"
+	anthropicoauth "github.com/charmbracelet/crush/internal/oauth/anthropic"
 	openaioauth "github.com/charmbracelet/crush/internal/oauth/openai"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -41,6 +42,21 @@ func TestSetupOpenAICodex(t *testing.T) {
 	require.Equal(t, false, pc.ExtraBody["store"])
 	require.Equal(t, "You are a helpful coding assistant.", pc.ExtraBody["instructions"])
 	require.Contains(t, pc.ExtraBody["include"], "reasoning.encrypted_content")
+}
+
+func TestSetupAnthropicOAuth(t *testing.T) {
+	t.Parallel()
+
+	pc := &ProviderConfig{}
+	pc.SetupAnthropicOAuth()
+	require.Equal(t, anthropicoauth.BetaOAuth, pc.ExtraHeaders[anthropicoauth.HeaderBeta])
+
+	pc.SetupAnthropicOAuth()
+	require.Equal(t, anthropicoauth.BetaOAuth, pc.ExtraHeaders[anthropicoauth.HeaderBeta])
+
+	pc.ExtraHeaders[anthropicoauth.HeaderBeta] = "structured-outputs-2025-11-13"
+	pc.SetupAnthropicOAuth()
+	require.Equal(t, "structured-outputs-2025-11-13,"+anthropicoauth.BetaOAuth, pc.ExtraHeaders[anthropicoauth.HeaderBeta])
 }
 
 func TestSetProviderAPIKeyOpenAICodexPersistsOAuthDefaults(t *testing.T) {
@@ -163,6 +179,29 @@ func TestOpenAICodexProviderIncludesLatestModels(t *testing.T) {
 	require.Equal(t, []string{"low", "medium", "high", "xhigh"}, gpt53Codex.ReasoningLevels)
 }
 
+func TestSetProviderAPIKeyAnthropicPersistsOAuthDefaults(t *testing.T) {
+	t.Parallel()
+
+	store, configPath := newOpenAICodexStoreForTest(t)
+	token := &oauth.Token{
+		AccessToken:  "anthropic-access-token",
+		RefreshToken: "anthropic-refresh-token",
+		ExpiresIn:    3600,
+	}
+
+	err := store.SetProviderAPIKey(ScopeGlobal, "anthropic", token)
+	require.NoError(t, err)
+
+	provider, ok := store.Config().Providers.Get("anthropic")
+	require.True(t, ok)
+	require.NotNil(t, provider.OAuthToken)
+	require.Equal(t, anthropicoauth.BetaOAuth, provider.ExtraHeaders[anthropicoauth.HeaderBeta])
+
+	data := readConfigFile(t, configPath)
+	require.Equal(t, token.AccessToken, gjson.Get(data, "providers.anthropic.api_key").String())
+	require.Equal(t, token.RefreshToken, gjson.Get(data, "providers.anthropic.oauth.refresh_token").String())
+}
+
 func TestConfigConfigureProvidersOpenAICodexAddsDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -204,7 +243,12 @@ func newOpenAICodexStoreForTest(t *testing.T) (*ConfigStore, string) {
 	store := &ConfigStore{
 		config:         cfg,
 		globalDataPath: configPath,
-		knownProviders: []catwalk.Provider{OpenAICodexProvider()},
+		knownProviders: []catwalk.Provider{OpenAICodexProvider(), {
+			ID:          catwalk.InferenceProviderAnthropic,
+			Name:        "Anthropic",
+			APIEndpoint: "https://api.anthropic.com/v1",
+			Type:        catwalk.TypeAnthropic,
+		}},
 	}
 	return store, configPath
 }
