@@ -1949,9 +1949,13 @@ func (m *UI) openAuthenticationDialog(provider catwalk.Provider, model config.Se
 		isOnboarding = m.state == uiOnboarding
 	)
 
+	skipGrace := false
 	switch provider.ID {
 	case "hyper":
 		dlg, cmd = dialog.NewOAuthHyper(m.com, isOnboarding, provider, model, modelType)
+	case catwalk.InferenceProviderAnthropic:
+		dlg, cmd = dialog.NewOAuthAnthropic(m.com, isOnboarding, provider, model, modelType)
+		skipGrace = true
 	case catwalk.InferenceProviderCopilot:
 		dlg, cmd = dialog.NewOAuthCopilot(m.com, isOnboarding, provider, model, modelType)
 	case catwalk.InferenceProvider(config.OpenAICodexProviderID):
@@ -1965,7 +1969,11 @@ func (m *UI) openAuthenticationDialog(provider catwalk.Provider, model config.Se
 		return nil
 	}
 
-	m.dialog.OpenDialogWithGrace(dlg)
+	if skipGrace {
+		m.dialog.OpenDialog(dlg)
+	} else {
+		m.dialog.OpenDialogWithGrace(dlg)
+	}
 	return cmd
 }
 
