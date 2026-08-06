@@ -162,21 +162,34 @@ func TestOpenAICodexProviderIncludesLatestModels(t *testing.T) {
 
 	provider := OpenAICodexProvider()
 
-	require.Equal(t, "gpt-5.2-codex", provider.DefaultLargeModelID)
-	require.Equal(t, "gpt-5.1-codex-mini", provider.DefaultSmallModelID)
+	require.Equal(t, "gpt-5.6-sol", provider.DefaultLargeModelID)
+	require.Equal(t, "gpt-5.6-luna", provider.DefaultSmallModelID)
+	require.Contains(t, modelIDs(provider.Models), "gpt-5.6-sol")
+	require.Contains(t, modelIDs(provider.Models), "gpt-5.6-terra")
+	require.Contains(t, modelIDs(provider.Models), "gpt-5.6-luna")
+	require.Contains(t, modelIDs(provider.Models), "gpt-5.5")
+	require.Contains(t, modelIDs(provider.Models), "gpt-5.5-pro")
 	require.Contains(t, modelIDs(provider.Models), "gpt-5.4")
-	require.Contains(t, modelIDs(provider.Models), "gpt-5.4-mini")
-	require.Contains(t, modelIDs(provider.Models), "gpt-5.4-nano")
+	require.Contains(t, modelIDs(provider.Models), "gpt-5.4-pro")
 	require.Contains(t, modelIDs(provider.Models), "gpt-5.3-codex")
+	require.Contains(t, modelIDs(provider.Models), "gpt-4.1")
+	require.Contains(t, modelIDs(provider.Models), "gpt-4o")
 
-	gpt54 := modelByID(t, provider.Models, "gpt-5.4")
-	require.EqualValues(t, 1050000, gpt54.ContextWindow)
-	require.EqualValues(t, 128000, gpt54.DefaultMaxTokens)
-	require.Equal(t, []string{"none", "low", "medium", "high", "xhigh"}, gpt54.ReasoningLevels)
+	gpt56Sol := modelByID(t, provider.Models, "gpt-5.6-sol")
+	require.EqualValues(t, 1050000, gpt56Sol.ContextWindow)
+	require.EqualValues(t, 128000, gpt56Sol.DefaultMaxTokens)
+	require.Equal(t, []string{"none", "low", "medium", "high", "xhigh", "max"}, gpt56Sol.ReasoningLevels)
 
-	gpt53Codex := modelByID(t, provider.Models, "gpt-5.3-codex")
-	require.EqualValues(t, 400000, gpt53Codex.ContextWindow)
-	require.Equal(t, []string{"low", "medium", "high", "xhigh"}, gpt53Codex.ReasoningLevels)
+	gpt55 := modelByID(t, provider.Models, "gpt-5.5")
+	require.Equal(t, []string{"low", "medium", "high", "xhigh"}, gpt55.ReasoningLevels)
+
+	gpt41 := modelByID(t, provider.Models, "gpt-4.1")
+	require.False(t, gpt41.CanReason)
+	require.True(t, gpt41.SupportsImages)
+
+	o3Mini := modelByID(t, provider.Models, "o3-mini")
+	require.True(t, o3Mini.CanReason)
+	require.False(t, o3Mini.SupportsImages)
 }
 
 func TestSetProviderAPIKeyAnthropicPersistsOAuthDefaults(t *testing.T) {
