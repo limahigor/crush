@@ -171,9 +171,10 @@ type (
 		sessionFiles []SessionFile
 	}
 	// creditsUpdatedMsg is sent when the remaining Hyper credits have been
-	// fetched from the API.
+	// fetched from the API. credits is nil when the team has hypercredit
+	// display disabled.
 	creditsUpdatedMsg struct {
-		credits int
+		credits *int
 	}
 )
 
@@ -245,6 +246,11 @@ type UI struct {
 
 	// Editor components
 	textarea textarea.Model
+
+	// textareaMouseSelecting tracks whether a mouse selection gesture is
+	// currently in progress within the textarea (left button held after a
+	// click inside the textarea region).
+	textareaMouseSelecting bool
 
 	// Active inline editor replaces the textarea when non-nil.
 	activeInline dialog.InlineEditor
@@ -370,6 +376,8 @@ type UI struct {
 	hoverY        int
 
 	// hyperCredits is the remaining Hyper credits, updated after each prompt.
+	// It is nil when unknown, or when the team has hypercredit display
+	// disabled, and no balance is rendered in either case.
 	hyperCredits *int
 
 	// Prompt history for up/down navigation through previous messages.
@@ -391,6 +399,21 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 	ta.DynamicHeight = true
 	ta.MinHeight = TextareaMinHeight
 	ta.MaxHeight = TextareaMaxHeight
+	// "ctrl+a" is bound to line-start in the textarea; crush uses "ctrl+g"
+	// for help, so bind select-all to "ctrl+a" instead (line-start remains
+	// available via "home").
+	ta.KeyMap.LineStart = key.NewBinding(
+		key.WithKeys("home"),
+		key.WithHelp("home", "line start"),
+	)
+	ta.KeyMap.SelectAll = key.NewBinding(
+		key.WithKeys("ctrl+shift+a"),
+		key.WithHelp("ctrl+shift+a", "select all"),
+	)
+	// Copying is handled by crush's keymap (Editor.CopySelection) so it can
+	// use crush's clipboard backend and user feedback; disable the
+	// textarea's built-in copy binding.
+	ta.KeyMap.CopySelection = key.NewBinding()
 	ta.Focus()
 
 	scrollbarMode := config.ScrollbarDefault
@@ -767,6 +790,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.setSessionMessages(msgs); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		if cmd := m.restoreModelFromSession(msgs); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		if cmd := m.autoExpandPillsIfReasonable(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -1005,7 +1031,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseClickMsg:
 		// Pass mouse events to dialogs first if any are open.
 		if m.dialog.HasDialogs() {
-			m.dialog.Update(msg)
+			if cmd := m.handleDialogMsg(msg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 			return m, tea.Batch(cmds...)
 		}
 
@@ -1033,6 +1061,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeInline == nil && msg.Button == uv.MouseLeft && len(m.attachments.List()) > 0 && msg.Y == m.layout.editor.Min.Y {
 			relX := msg.X - m.layout.editor.Min.X
 			if m.attachments.HandleClick(relX) {
+				return m, tea.Batch(cmds...)
+			}
+		}
+
+		// Forward clicks within the textarea region to the textarea so it
+		// can position the cursor and start a selection.
+		if m.activeInline == nil {
+			if handled, cmd := m.forwardMouseToTextarea(msg); handled {
+				cmds = append(cmds, cmd)
 				return m, tea.Batch(cmds...)
 			}
 		}
@@ -1069,6 +1106,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					clickable.SetHover(msg.X, msg.Y)
 				}
 			}
+		}
+
+		// While a mouse selection is in progress in the textarea, forward
+		// motion events to it and skip chat drag handling.
+		if m.activeInline == nil && m.textareaMouseSelecting {
+			if handled, cmd := m.forwardMouseToTextarea(msg); handled {
+				cmds = append(cmds, cmd)
+			}
+			return m, tea.Batch(cmds...)
 		}
 
 		switch m.state {
@@ -1112,6 +1158,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Pass mouse events to dialogs first if any are open.
 		if m.dialog.HasDialogs() {
 			m.dialog.Update(msg)
+			return m, tea.Batch(cmds...)
+		}
+
+		// End any in-progress textarea mouse selection.
+		if m.textareaMouseSelecting {
+			m.textareaMouseSelecting = false
+			if handled, cmd := m.forwardMouseToTextarea(msg); handled {
+				cmds = append(cmds, cmd)
+			}
 			return m, tea.Batch(cmds...)
 		}
 
@@ -1310,7 +1365,7 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 	case creditsUpdatedMsg:
-		m.hyperCredits = &msg.credits
+		m.hyperCredits = msg.credits
 	case util.InfoMsg:
 		if msg.Type == util.InfoTypeError {
 			slog.Error("Error reported", "error", msg.Msg)
@@ -1410,15 +1465,15 @@ func (m *UI) setSessionMessages(msgs []message.Message) tea.Cmd {
 		switch msg.Role {
 		case message.User:
 			m.lastUserMessageTime = msg.CreatedAt
-			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
+			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
 		case message.Assistant:
-			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
+			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
 			if msg.FinishPart() != nil && msg.FinishPart().Reason == message.FinishReasonEndTurn {
 				infoItem := chat.NewAssistantInfoItem(m.com.Styles, msg, m.com.Config(), time.Unix(m.lastUserMessageTime, 0))
 				items = append(items, infoItem)
 			}
 		default:
-			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap)...)
+			items = append(items, chat.ExtractMessageItems(m.com.Styles, msg, toolResultMap, m.com.Workspace.WorkingDir())...)
 		}
 	}
 
@@ -1519,7 +1574,7 @@ func (m *UI) loadNestedToolCalls(items []chat.MessageItem) {
 		// Extract nested tool items.
 		var nestedTools []chat.ToolMessageItem
 		for _, nestedMsg := range nestedMsgPtrs {
-			nestedItems := chat.ExtractMessageItems(m.com.Styles, nestedMsg, nestedToolResultMap)
+			nestedItems := chat.ExtractMessageItems(m.com.Styles, nestedMsg, nestedToolResultMap, m.com.Workspace.WorkingDir())
 			for _, nestedItem := range nestedItems {
 				if nestedToolItem, ok := nestedItem.(chat.ToolMessageItem); ok {
 					// Mark nested tools as simple (compact) rendering.
@@ -1569,7 +1624,7 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 			return nil
 		}
 		m.lastUserMessageTime = msg.CreatedAt
-		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil)
+		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir())
 		for _, item := range items {
 			if animatable, ok := item.(chat.Animatable); ok {
 				if cmd := animatable.StartAnimation(); cmd != nil {
@@ -1582,7 +1637,7 @@ func (m *UI) appendSessionMessage(msg message.Message) tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 	case message.Assistant:
-		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil)
+		items := chat.ExtractMessageItems(m.com.Styles, &msg, nil, m.com.Workspace.WorkingDir())
 		for _, item := range items {
 			if animatable, ok := item.(chat.Animatable); ok {
 				if cmd := animatable.StartAnimation(); cmd != nil {
@@ -1706,7 +1761,7 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 			}
 		}
 		if existingToolItem == nil {
-			items = append(items, chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false))
+			items = append(items, chat.NewToolMessageItem(m.com.Styles, msg.ID, tc, nil, false, m.com.Workspace.WorkingDir()))
 		}
 	}
 
@@ -1720,10 +1775,9 @@ func (m *UI) updateSessionMessage(msg message.Message) tea.Cmd {
 
 	m.chat.AppendMessages(items...)
 	if m.chat.Follow() {
-		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+		if cmd := m.chat.ScrollToBottomAndSelectLast(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-		m.chat.SelectLast()
 	}
 
 	return tea.Sequence(cmds...)
@@ -1783,7 +1837,7 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 		}
 		if !found {
 			// Create a new nested tool item.
-			nestedItem := chat.NewToolMessageItem(m.com.Styles, event.Payload.ID, tc, nil, false)
+			nestedItem := chat.NewToolMessageItem(m.com.Styles, event.Payload.ID, tc, nil, false, m.com.Workspace.WorkingDir())
 			if simplifiable, ok := nestedItem.(chat.Compactable); ok {
 				simplifiable.SetCompact(true)
 			}
@@ -1813,10 +1867,9 @@ func (m *UI) handleChildSessionMessage(event pubsub.Event[message.Message]) tea.
 	m.chat.UpdateNestedToolIDs(toolCallID)
 
 	if m.chat.Follow() {
-		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+		if cmd := m.chat.ScrollToBottomAndSelectLast(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-		m.chat.SelectLast()
 	}
 
 	return tea.Sequence(cmds...)
@@ -2169,6 +2222,69 @@ func (m *UI) fetchHyperCredits() tea.Cmd {
 	}
 }
 
+// restoreModelFromSession checks the last assistant message in the
+// loaded session and, if it used a different provider/model than the
+// current config, restores that model/provider provided it is still
+// available. Returns a tea.Cmd that rebuilds the agent models if a
+// switch was made, or nil if no switch was needed.
+func (m *UI) restoreModelFromSession(msgs []message.Message) tea.Cmd {
+	var lastAssistant *message.Message
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == message.Assistant && !msgs[i].IsSummaryMessage {
+			lastAssistant = &msgs[i]
+			break
+		}
+	}
+	if lastAssistant == nil || lastAssistant.Provider == "" || lastAssistant.Model == "" {
+		return nil
+	}
+
+	cfg := m.com.Config()
+	if cfg == nil {
+		return nil
+	}
+
+	currentLarge := cfg.Models[config.SelectedModelTypeLarge]
+	if currentLarge.Provider == lastAssistant.Provider && currentLarge.Model == lastAssistant.Model {
+		return nil
+	}
+
+	if !cfg.IsModelAvailable(lastAssistant.Provider, lastAssistant.Model) {
+		slog.Debug("Skipping model restoration: provider/model not available",
+			"provider", lastAssistant.Provider,
+			"model", lastAssistant.Model)
+		return nil
+	}
+
+	selectedModel := config.SelectedModel{
+		Provider: lastAssistant.Provider,
+		Model:    lastAssistant.Model,
+	}
+	if err := m.com.Workspace.UpdatePreferredModel(config.ScopeGlobal, config.SelectedModelTypeLarge, selectedModel); err != nil {
+		slog.Error("Failed to restore model from session", "error", err)
+		return nil
+	}
+
+	m.applyThemeForProvider(lastAssistant.Provider)
+
+	if _, ok := cfg.Models[config.SelectedModelTypeSmall]; !ok {
+		smallModel := m.com.Workspace.GetDefaultSmallModel(lastAssistant.Provider)
+		if err := m.com.Workspace.UpdatePreferredModel(config.ScopeGlobal, config.SelectedModelTypeSmall, smallModel); err != nil {
+			slog.Error("Failed to set small model during session restore", "error", err)
+		}
+	}
+
+	return m.updateAgentModelCmd(func() tea.Msg {
+		if err := m.com.Workspace.UpdateAgentModel(context.TODO()); err != nil {
+			return util.ReportError(err)
+		}
+		slog.Info("Restored model from session",
+			"provider", lastAssistant.Provider,
+			"model", lastAssistant.Model)
+		return nil
+	})
+}
+
 // handleSelectModel performs the model selection after any provider
 // pre-checks (such as a silent Hyper OAuth refresh) have completed.
 func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
@@ -2338,6 +2454,13 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			m.detailsOpen = !m.detailsOpen
 			m.updateLayoutAndSize()
 			return true
+		case key.Matches(msg, m.keyMap.Chat.EndFollow):
+			if m.state == uiChat && m.hasSession() {
+				if cmd := m.chat.ScrollToBottomAndSelectLast(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				return true
+			}
 		case key.Matches(msg, m.keyMap.Chat.TogglePills):
 			if m.state == uiChat && m.hasSession() {
 				if cmd := m.togglePillsExpanded(); cmd != nil {
@@ -2485,6 +2608,8 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 					break
 				}
 				cmds = append(cmds, m.pasteImageFromClipboard)
+			case key.Matches(msg, m.keyMap.Editor.PasteText):
+				cmds = append(cmds, m.pasteTextFromClipboard)
 
 			case key.Matches(msg, m.keyMap.Editor.SendMessage):
 				prevHeight := m.textarea.Height()
@@ -2560,6 +2685,24 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				m.textarea.InsertRune('\n')
 				m.closeCompletions()
 				cmds = append(cmds, m.updateTextareaWithPrevHeight(msg, prevHeight))
+			case key.Matches(msg, m.keyMap.Editor.CopySelection):
+				if m.textarea.HasSelection() {
+					cmds = append(cmds, common.CopyToClipboardWithCallback(
+						m.textarea.SelectedText(),
+						"Selection copied to clipboard",
+						nil,
+					))
+					m.textarea.ClearSelection()
+				}
+			case key.Matches(msg, m.keyMap.Editor.CutSelection):
+				if m.textarea.HasSelection() {
+					cmds = append(cmds, common.CopyToClipboardWithCallback(
+						m.textarea.SelectedText(),
+						"Selection cut to clipboard",
+						nil,
+					))
+					m.textarea.DeleteSelection()
+				}
 			case key.Matches(msg, m.keyMap.Editor.HistoryPrev):
 				cmd := m.handleHistoryUp(msg)
 				if cmd != nil {
@@ -2755,10 +2898,9 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				}
 				m.chat.SelectFirst()
 			case key.Matches(msg, m.keyMap.Chat.End):
-				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+				if cmd := m.chat.ScrollToBottomAndSelectLast(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
-				m.chat.SelectLast()
 			default:
 				if ok, cmd := m.chat.HandleKeyMsg(msg); ok {
 					cmds = append(cmds, cmd)
@@ -3172,7 +3314,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 			k.ToggleYolo,
 		)
 		if hasSession {
-			mainBinds = append(mainBinds, k.Chat.NewSession)
+			mainBinds = append(mainBinds, k.Chat.NewSession, k.Chat.EndFollow)
 		}
 
 		binds = append(binds, mainBinds)
@@ -3183,6 +3325,10 @@ func (m *UI) FullHelp() [][]key.Binding {
 				k.Editor.Newline,
 				k.Editor.MentionFile,
 				k.Editor.OpenEditor,
+				k.Editor.PasteText,
+				k.Editor.SelectAll,
+				k.Editor.CopySelection,
+				k.Editor.CutSelection,
 			}
 			if m.currentModelSupportsImages() {
 				editorBinds = append(editorBinds, k.Editor.AddImage, k.Editor.PasteImage)
@@ -3226,6 +3372,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 					k.Chat.HalfPageDown,
 					k.Chat.Home,
 					k.Chat.End,
+					k.Chat.EndFollow,
 					k.Chat.FocusSidebar,
 				},
 				[]key.Binding{
@@ -3253,6 +3400,10 @@ func (m *UI) FullHelp() [][]key.Binding {
 				k.Editor.Newline,
 				k.Editor.MentionFile,
 				k.Editor.OpenEditor,
+				k.Editor.PasteText,
+				k.Editor.SelectAll,
+				k.Editor.CopySelection,
+				k.Editor.CutSelection,
 			}
 			if m.currentModelSupportsImages() {
 				editorBinds = append(editorBinds, k.Editor.AddImage, k.Editor.PasteImage)
@@ -3354,6 +3505,55 @@ func (m *UI) handleTextareaHeightChange(prevHeight int) tea.Cmd {
 // the textarea height changed as a result.
 func (m *UI) updateTextarea(msg tea.Msg) tea.Cmd {
 	return m.updateTextareaWithPrevHeight(msg, m.textarea.Height())
+}
+
+// forwardMouseToTextarea forwards a mouse event to the textarea with
+// coordinates translated into the textarea's local space. It reports whether
+// the event landed within the textarea's rendered region and was forwarded.
+func (m *UI) forwardMouseToTextarea(msg tea.MouseMsg) (bool, tea.Cmd) {
+	mouse := msg.Mouse()
+
+	// The textarea is rendered inside layout.editor below the attachments
+	// row. renderEditorView always reserves the first row for attachments
+	// (an empty line when there are none), so the textarea always starts
+	// one row below the editor top.
+	const attachmentsRow = 1
+	origin := image.Pt(m.layout.editor.Min.X, m.layout.editor.Min.Y+attachmentsRow)
+
+	// The textarea occupies its own height starting at the origin.
+	area := image.Rectangle{Min: origin, Max: origin.Add(image.Pt(m.layout.editor.Dx(), m.textarea.Height()))}
+	if !image.Pt(mouse.X, mouse.Y).In(area) {
+		return false, nil
+	}
+
+	rel := tea.Mouse{
+		X:      mouse.X - origin.X,
+		Y:      mouse.Y - origin.Y,
+		Button: mouse.Button,
+		Mod:    mouse.Mod,
+	}
+
+	switch msg.(type) {
+	case tea.MouseClickMsg:
+		if rel.Button != uv.MouseLeft {
+			return false, nil
+		}
+		m.textareaMouseSelecting = true
+		m.textarea.BeginSelection(rel.X, rel.Y)
+		return true, nil
+	case tea.MouseMotionMsg:
+		if !m.textareaMouseSelecting {
+			return true, nil
+		}
+		m.textarea.ExtendSelection(rel.X, rel.Y)
+		return true, nil
+	case tea.MouseReleaseMsg:
+		m.textarea.EndSelection()
+		m.textareaMouseSelecting = false
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 // updateTextareaWithPrevHeight is for cases when the height of the layout may
@@ -3888,6 +4088,12 @@ func (m *UI) isAgentBusy() bool {
 // hasSession returns true if there is an active session with a valid ID.
 func (m *UI) hasSession() bool {
 	return m.session != nil && m.session.ID != ""
+}
+
+// CurrentSession returns the active session, or nil when there is none.
+// It is safe to call after the TUI has exited.
+func (m *UI) CurrentSession() *session.Session {
+	return m.session
 }
 
 // mimeOf detects the MIME type of the given content.
@@ -4759,6 +4965,19 @@ func (m *UI) handleFilePathPaste(path string) tea.Cmd {
 			Content:  content,
 		}
 	}
+}
+
+// pasteTextFromClipboard reads text from the system clipboard and returns a
+// tea.PasteMsg so it flows through the same paste logic as bracketed paste.
+func (m *UI) pasteTextFromClipboard() tea.Msg {
+	textData, err := clipboard.Read(clipboard.FormatText)
+	if err != nil || len(textData) == 0 {
+		return util.InfoMsg{
+			Type: util.InfoTypeError,
+			Msg:  "Clipboard is empty or does not contain text",
+		}
+	}
+	return tea.PasteMsg{Content: string(textData)}
 }
 
 // pasteImageFromClipboard reads image data from the system clipboard and
